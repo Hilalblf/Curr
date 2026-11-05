@@ -1,7 +1,10 @@
+
 import os
 import asyncio
 import logging
+from datetime import datetime, date
 from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -25,7 +28,6 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROUP_ID = os.getenv("GROUP_ID")
-
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
 # تحديث كل 3 ساعات
@@ -35,8 +37,16 @@ UPDATE_INTERVAL = 3 * 60 * 60
 FIRST_UPDATE = 10
 
 # أقصى فرق مسموح بين المصدرين
-# 0.005 = 0.50%
 MAX_SOURCE_DIFFERENCE = Decimal("0.005")
+
+# توقيت رومانيا
+TIMEZONE = ZoneInfo("Europe/Bucharest")
+
+# تاريخ رمضان المتوقع - قابل للتعديل من Railway
+RAMADAN_DATE = os.getenv(
+    "RAMADAN_DATE",
+    "2027-02-08"
+)
 
 
 # ============================================================
@@ -58,9 +68,76 @@ logger = logging.getLogger("LEX")
 session = requests.Session()
 
 session.headers.update({
-    "User-Agent": "LEX-FX-Bot/2.0",
+    "User-Agent": "LEX-FX-Bot/3.0",
     "Accept": "application/json",
 })
+
+
+# ============================================================
+# ADHKAR
+# ============================================================
+
+ADHKAR = [
+    "سُبْحَانَ اللَّهِ وَبِحَمْدِهِ، سُبْحَانَ اللَّهِ الْعَظِيمِ.",
+
+    "أَسْتَغْفِرُ اللَّهَ وَأَتُوبُ إِلَيْهِ.",
+
+    "لَا حَوْلَ وَلَا قُوَّةَ إِلَّا بِاللَّهِ.",
+
+    "اللَّهُمَّ صَلِّ وَسَلِّمْ عَلَى نَبِيِّنَا مُحَمَّدٍ ﷺ.",
+
+    "سُبْحَانَ اللَّهِ، وَالْحَمْدُ لِلَّهِ، وَلَا إِلَهَ إِلَّا اللَّهُ، وَاللَّهُ أَكْبَرُ.",
+
+    "رَضِيتُ بِاللَّهِ رَبًّا، وَبِالْإِسْلَامِ دِينًا، وَبِمُحَمَّدٍ ﷺ نَبِيًّا.",
+
+    "اللَّهُمَّ اغْفِرْ لِي وَارْحَمْنِي وَاهْدِنِي.",
+
+    "الْحَمْدُ لِلَّهِ عَلَى كُلِّ حَالٍ.",
+
+    "لَا إِلَهَ إِلَّا اللَّهُ وَحْدَهُ لَا شَرِيكَ لَهُ."
+]
+
+
+def get_daily_dhikr():
+
+    now = datetime.now(TIMEZONE)
+
+    # يتغير الذكر كل 3 ساعات
+    slot = int(now.timestamp() // UPDATE_INTERVAL)
+
+    index = slot % len(ADHKAR)
+
+    return ADHKAR[index]
+
+
+# ============================================================
+# RAMADAN COUNTDOWN
+# ============================================================
+
+def get_ramadan_countdown():
+
+    today = datetime.now(TIMEZONE).date()
+
+    try:
+        ramadan = date.fromisoformat(RAMADAN_DATE)
+
+    except ValueError:
+        logger.error("Invalid RAMADAN_DATE")
+        ramadan = date(2027, 2, 8)
+
+    remaining = (ramadan - today).days
+
+    if remaining > 1:
+        return f"🌙 باقي على رمضان {remaining} يوماً"
+
+    elif remaining == 1:
+        return "🌙 باقي يوم واحد على رمضان"
+
+    elif remaining == 0:
+        return "🌙 اليوم أول رمضان، رمضان مبارك!"
+
+    else:
+        return "🌙 نسأل الله أن يتقبل منا ومنكم صالح الأعمال."
 
 
 # ============================================================
@@ -72,6 +149,9 @@ def validate_rate(value):
     try:
 
         rate = Decimal(str(value))
+
+        if not rate.is_finite():
+            return None
 
         if rate <= Decimal("0.50"):
             return None
@@ -86,7 +166,6 @@ def validate_rate(value):
         TypeError,
         ValueError,
     ):
-
         return None
 
 
@@ -97,9 +176,7 @@ def validate_rate(value):
 def get_twelve_data():
 
     if not TWELVE_DATA_API_KEY:
-        raise RuntimeError(
-            "TWELVE_DATA_API_KEY missing"
-        )
+        raise RuntimeError("TWELVE_DATA_API_KEY missing")
 
     url = "https://api.twelvedata.com/price"
 
@@ -108,9 +185,7 @@ def get_twelve_data():
         "apikey": TWELVE_DATA_API_KEY,
     }
 
-    logger.info(
-        "1️⃣ Requesting Twelve Data..."
-    )
+    logger.info("1️⃣ Requesting Twelve Data...")
 
     response = session.get(
         url,
@@ -123,32 +198,24 @@ def get_twelve_data():
     data = response.json()
 
     if data.get("status") == "error":
-
         raise RuntimeError(
-            data.get(
-                "message",
-                "Twelve Data error"
-            )
+            data.get("message", "Twelve Data error")
         )
 
     price = data.get("price")
 
     if price is None:
-
         raise RuntimeError(
             f"Twelve Data price missing: {data}"
         )
 
-    # EUR/USD
     eur_usd = validate_rate(price)
 
     if eur_usd is None:
-
         raise RuntimeError(
             f"Invalid EUR/USD: {price}"
         )
 
-    # EUR/USD -> USD/EUR
     usd_eur = Decimal("1") / eur_usd
 
     logger.info(
@@ -170,18 +237,13 @@ def get_twelve_data():
 
 def get_exchangerate_dev():
 
-    url = (
-        "https://api.exchangerate.dev/"
-        "v1/latest/USD"
-    )
+    url = "https://api.exchangerate.dev/v1/latest/USD"
 
     params = {
         "symbols": "EUR",
     }
 
-    logger.info(
-        "2️⃣ Requesting ExchangeRate.dev..."
-    )
+    logger.info("2️⃣ Requesting ExchangeRate.dev...")
 
     response = session.get(
         url,
@@ -194,7 +256,6 @@ def get_exchangerate_dev():
     data = response.json()
 
     if data.get("result") != "success":
-
         raise RuntimeError(
             f"ExchangeRate.dev error: {data}"
         )
@@ -202,7 +263,6 @@ def get_exchangerate_dev():
     rates = data.get("rates")
 
     if not isinstance(rates, dict):
-
         raise RuntimeError(
             "ExchangeRate.dev rates missing"
         )
@@ -212,7 +272,6 @@ def get_exchangerate_dev():
     usd_eur = validate_rate(value)
 
     if usd_eur is None:
-
         raise RuntimeError(
             f"Invalid ExchangeRate.dev USD/EUR: {value}"
         )
@@ -243,12 +302,10 @@ def get_verified_rate_sync():
         twelve_rate + second_rate
     ) / Decimal("2")
 
-    relative_difference = (
-        difference / average
-    )
+    relative_difference = difference / average
 
     logger.info(
-        "📊 Twelve Data      = %.8f",
+        "📊 Twelve Data = %.8f",
         twelve_rate,
     )
 
@@ -258,24 +315,20 @@ def get_verified_rate_sync():
     )
 
     logger.info(
-        "📊 Difference       = %.4f%%",
+        "📊 Difference = %.4f%%",
         relative_difference * 100,
     )
 
-    # رفض السعر إذا الفرق كبير
     if relative_difference > MAX_SOURCE_DIFFERENCE:
 
         raise RuntimeError(
-            "⚠️ Sources disagree too much: "
+            "Sources disagree too much: "
             f"{relative_difference * 100:.4f}%"
         )
 
-    # متوسط المصدرين
     usd_eur = average
 
-    eur_usd = (
-        Decimal("1") / usd_eur
-    )
+    eur_usd = Decimal("1") / usd_eur
 
     logger.info(
         "🎯 VERIFIED USD/EUR = %.8f",
@@ -320,7 +373,6 @@ async def get_verified_rate():
             )
 
             if attempt < 3:
-
                 await asyncio.sleep(
                     delays[attempt - 1]
                 )
@@ -334,14 +386,23 @@ async def get_verified_rate():
 # MESSAGE
 # ============================================================
 
-def make_message(
-    usd_eur,
-    eur_usd,
-):
+def make_message(usd_eur, eur_usd):
+
+    countdown = get_ramadan_countdown()
+
+    dhikr = get_daily_dhikr()
 
     return (
         f"🇺🇸 1 USD = {usd_eur:.6f} EUR\n"
-        f"🇪🇺 1 EUR = {eur_usd:.6f} USD\n\n"
+        f"🇪🇺 1 EUR = {eur_usd:.6f} USD\n"
+        "\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"{countdown}\n"
+        "\n"
+        "🤲 ذكر اليوم:\n"
+        f"«{dhikr}»\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "\n"
         "By LEX"
     )
 
@@ -350,11 +411,7 @@ def make_message(
 # TELEGRAM SEND
 # ============================================================
 
-async def send_safe(
-    context,
-    chat_id,
-    text,
-):
+async def send_safe(context, chat_id, message):
 
     for attempt in range(1, 4):
 
@@ -362,12 +419,10 @@ async def send_safe(
 
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=text,
+                text=message,
             )
 
-            logger.info(
-                "✅ Telegram message sent"
-            )
+            logger.info("✅ Telegram message sent")
 
             return True
 
@@ -394,16 +449,11 @@ async def send_safe(
             )
 
             if attempt < 3:
-
-                await asyncio.sleep(
-                    attempt * 3
-                )
+                await asyncio.sleep(attempt * 3)
 
         except Conflict:
 
-            logger.critical(
-                "🚨 409 CONFLICT"
-            )
+            logger.critical("🚨 409 CONFLICT")
 
             logger.critical(
                 "Another instance is using BOT_TOKEN."
@@ -427,34 +477,29 @@ async def send_safe(
 # AUTOMATIC UPDATE
 # ============================================================
 
-async def send_price(
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def send_price(context: ContextTypes.DEFAULT_TYPE):
 
-    logger.info(
-        "========== FX UPDATE =========="
-    )
+    logger.info("========== FX UPDATE ==========")
 
     try:
 
-        usd_eur, eur_usd = (
-            await get_verified_rate()
-        )
+        usd_eur, eur_usd = await get_verified_rate()
 
-        text = make_message(
+        message = make_message(
             usd_eur,
             eur_usd,
         )
 
-        await send_safe(
+        sent = await send_safe(
             context,
             GROUP_ID,
-            text,
+            message,
         )
 
-        logger.info(
-            "✅ VERIFIED PRICE SENT"
-        )
+        if sent:
+            logger.info("✅ VERIFIED PRICE SENT")
+        else:
+            logger.error("❌ TELEGRAM MESSAGE NOT SENT")
 
     except Exception as e:
 
@@ -463,9 +508,7 @@ async def send_price(
             e,
         )
 
-    logger.info(
-        "================================"
-    )
+    logger.info("================================")
 
 
 # ============================================================
@@ -478,10 +521,14 @@ async def start(
 ):
 
     await update.message.reply_text(
-        "🤖 LEX Bot خدام\n"
+        "🤖 LEX FX BOT V3 خدام\n"
+        "\n"
         "💱 USD / EUR\n"
-        "📊 Verified Forex Rate\n"
+        "📊 Double Verified Forex Rate\n"
+        "🌙 Ramadan Countdown\n"
+        "🤲 Daily Islamic Adhkar\n"
         "⏰ تحديث كل 3 ساعات\n"
+        "\n"
         "By LEX"
     )
 
@@ -497,9 +544,7 @@ async def price(
 
     try:
 
-        usd_eur, eur_usd = (
-            await get_verified_rate()
-        )
+        usd_eur, eur_usd = await get_verified_rate()
 
         await update.message.reply_text(
             make_message(
@@ -517,7 +562,7 @@ async def price(
 
         await update.message.reply_text(
             "❌ السعر غير متوفر حاليا.\n"
-            "المصدران لم يعطيا سعرًا متوافقًا."
+            "المصدران لم يعطيا سعراً متوافقاً."
         )
 
 
@@ -534,9 +579,7 @@ async def error_handler(
 
     if isinstance(error, Conflict):
 
-        logger.critical(
-            "🚨 TELEGRAM 409 CONFLICT"
-        )
+        logger.critical("🚨 TELEGRAM 409 CONFLICT")
 
         logger.critical(
             "Only ONE instance can use BOT_TOKEN."
@@ -557,47 +600,23 @@ async def error_handler(
 def main():
 
     if not BOT_TOKEN:
-        raise RuntimeError(
-            "BOT_TOKEN missing"
-        )
+        raise RuntimeError("BOT_TOKEN missing")
 
     if not GROUP_ID:
-        raise RuntimeError(
-            "GROUP_ID missing"
-        )
+        raise RuntimeError("GROUP_ID missing")
 
     if not TWELVE_DATA_API_KEY:
-        raise RuntimeError(
-            "TWELVE_DATA_API_KEY missing"
-        )
+        raise RuntimeError("TWELVE_DATA_API_KEY missing")
 
-    logger.info(
-        "======================================"
-    )
-
-    logger.info(
-        "🚀 LEX PRO FOREX BOT"
-    )
-
-    logger.info(
-        "1️⃣ Twelve Data"
-    )
-
-    logger.info(
-        "2️⃣ ExchangeRate.dev"
-    )
-
-    logger.info(
-        "🔐 Double verification enabled"
-    )
-
-    logger.info(
-        "⏰ Update every 3 HOURS"
-    )
-
-    logger.info(
-        "======================================"
-    )
+    logger.info("======================================")
+    logger.info("🚀 LEX PRO FX BOT V3")
+    logger.info("1️⃣ Twelve Data")
+    logger.info("2️⃣ ExchangeRate.dev")
+    logger.info("🔐 Double verification enabled")
+    logger.info("🌙 Ramadan Countdown enabled")
+    logger.info("🤲 Daily Adhkar enabled")
+    logger.info("⏰ Update every 3 HOURS")
+    logger.info("======================================")
 
     app = (
         Application.builder()
@@ -610,44 +629,25 @@ def main():
     )
 
     app.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
+        CommandHandler("start", start)
     )
 
     app.add_handler(
-        CommandHandler(
-            "price",
-            price,
-        )
+        CommandHandler("price", price)
     )
 
-    app.add_error_handler(
-        error_handler
-    )
+    app.add_error_handler(error_handler)
 
-    # ========================================================
-    # كل 3 ساعات
-    # ========================================================
-
+    # تحديث كل 3 ساعات
     app.job_queue.run_repeating(
         send_price,
         interval=UPDATE_INTERVAL,
         first=FIRST_UPDATE,
     )
 
-    logger.info(
-        "✅ Bot initialized"
-    )
-
-    logger.info(
-        "⏰ Automatic update every 3 hours"
-    )
-
-    logger.info(
-        "▶️ Telegram polling started"
-    )
+    logger.info("✅ Bot initialized")
+    logger.info("⏰ Automatic update every 3 hours")
+    logger.info("▶️ Telegram polling started")
 
     app.run_polling(
         drop_pending_updates=True,
@@ -661,3 +661,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+ 
